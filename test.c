@@ -2,24 +2,38 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/poll.h>
 #include <termios.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <wiringPi.h>
 
 #define BAUDRATE B1000000
+#define SHUTTER_PIN 0
+
+volatile int trigCam = 0;
+
+void isr()
+{
+	trigCam = 1;
+}
 
 int main()
 {
 	int fd;
 	struct termios newtio;
-	struct pollfd poll_handler;
+	char fbuf[1024];
 	char buf[256];
 
-	fd = open("/dev/ttyAMA0", O_RDWR|O_NOCTTY);
+	wiringPiSetup();
+	pinMode(SHUTTER_PIN, INPUT);
+	pullUpDnControl(SHUTTER_PIN, PUD_UP);
+	wiringPiISR(SHUTTER_PIN, INT_EDGE_FALLING, &isr);
+
+	fd = open("/dev/ttyS0", O_RDWR|O_NOCTTY);
 	if(fd<0) {
 		fprintf(stderr, "failed to open port: %s.\r\n", strerror(errno));
 		printf("Make sure you are executing in sudo.\r\n");
+		return 1;
 	}
 	usleep(250000);
 
@@ -38,26 +52,23 @@ int main()
 	tcflush(fd, TCIFLUSH);
 	tcsetattr(fd, TCSANOW, &newtio);
 
-	poll_handler.fd = fd;
-	poll_handler.events = POLLIN|POLLERR;
-	poll_handler.revents = 0;
-
 	while(1) {
-		if(poll((struct pollfd*)&poll_handler, 1, 1000) > 0) {
-			if(poll_handler.revents & POLLIN) {
-				int cnt = read(fd, buf, 256);
-				buf[cnt] = '\0';
-				write(fd, "echo: ", 6);
-				write(fd, buf, cnt);
-				write(fd, "\r\n", 2);
-				printf("Data Received: %s\r\n", buf);
+		if(trigCam) {
+			system("raspistill -w 640 -h 480 -t 10 -o image.jpg");
+			usleep(10000);
+			int img = open("./image.jpg", O_RDONLY);
+			if(img > 0) {
+				ssize_t rd_size;
+				do {
+					rd_size = read(img, fbuf, 1024);
+					write(fd, fbuf, rd_size);
+				} while(rd_size > 0);
 			}
-			else if(poll_handler.revents & POLLERR) {
-				printf("Error in communication. Abort program\r\n");
-				break;
+			else {
+				printf("failed to open file\r\n");
 			}
+			trigCam = 0;
 		}
 	}
-	close(fd);
 	return 0;
 }
